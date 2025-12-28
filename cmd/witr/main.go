@@ -5,260 +5,373 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
-	procpkg "github.com/pranshuparmar/witr/internal/proc"
-	"github.com/pranshuparmar/witr/internal/output"
-	"github.com/pranshuparmar/witr/internal/process"
-	"github.com/pranshuparmar/witr/internal/source"
-	"github.com/pranshuparmar/witr/internal/target"
-	"github.com/pranshuparmar/witr/pkg/model"
+	"github.com/pranshuparmar/witr/detect"
+	"github.com/pranshuparmar/witr/process"
 )
 
 var version = ""
 var commit = ""
 var buildDate = ""
 
-func printHelp() {
-	fmt.Println("Usage: witr [--pid N | --port N | name] [--short] [--tree] [--json] [--warnings] [--no-color] [--env] [--help] [--version]")
-	fmt.Println("  --pid <n>         Explain a specific PID")
-	fmt.Println("  --port <n>        Explain port usage")
-	fmt.Println("  --short           One-line summary")
-	fmt.Println("  --tree            Show full process ancestry tree")
-	fmt.Println("  --json            Output result as JSON")
-	fmt.Println("  --warnings        Show only warnings")
-	fmt.Println("  --no-color        Disable colorized output")
-	fmt.Println("  --env             Show only environment variables for the process")
-	fmt.Println("  --help            Show this help message")
-	fmt.Println("  --version         Show version and exit")
-}
-
-// Helper: which flags need a value (not bool flags)?
-func flagNeedsValue(flag string) bool {
-	switch flag {
-	case "--pid", "-pid", "--port", "-port":
-		return true
-	}
-	return false
-}
-
 func main() {
-	// Sanity check: fail build if version is not injected
 	if version == "" {
-		fmt.Fprintln(os.Stderr, "ERROR: version not set. Use -ldflags '-X main.version=...' when building.")
+		fmt.Fprintln(os.Stderr, "ERROR: version not set")
 		os.Exit(2)
 	}
-	versionFlag := flag.Bool("version", false, "show version and exit")
 
-	// Reorder os.Args so all flags (with their values) come before positional arguments
-	reordered := []string{os.Args[0]}
-	var positionals []string
-	i := 1
-	for i < len(os.Args) {
-		arg := os.Args[i]
-		if len(arg) > 0 && arg[0] == '-' {
-			reordered = append(reordered, arg)
-			// If this flag takes a value (not a bool flag), keep the value with it
-			if flagNeedsValue(arg) && i+1 < len(os.Args) && os.Args[i+1][0] != '-' {
-				reordered = append(reordered, os.Args[i+1])
-				i++
-			}
-		} else {
-			positionals = append(positionals, arg)
-		}
-		i++
-	}
-	reordered = append(reordered, positionals...)
-	os.Args = reordered
-
-	pidFlag := flag.String("pid", "", "pid to explain")
-	portFlag := flag.String("port", "", "port to explain")
-	shortFlag := flag.Bool("short", false, "short output")
-	treeFlag := flag.Bool("tree", false, "tree output")
-	jsonFlag := flag.Bool("json", false, "output as JSON")
-	warnFlag := flag.Bool("warnings", false, "show only warnings")
-	noColorFlag := flag.Bool("no-color", false, "disable colorized output")
-	envFlag := flag.Bool("env", false, "show only environment variables for the process")
-	helpFlag := flag.Bool("help", false, "show help")
-
+	var (
+		pidFlag     = flag.Int("pid", 0, "explain a specific PID")
+		portFlag    = flag.Int("port", 0, "explain port usage")
+		shortFlag   = flag.Bool("short", false, "one-line summary")
+		treeFlag    = flag.Bool("tree", false, "show process tree")
+		jsonFlag    = flag.Bool("json", false, "output as JSON")
+		warnFlag    = flag.Bool("warnings", false, "show only warnings")
+		noColorFlag = flag.Bool("no-color", false, "disable color")
+		envFlag     = flag.Bool("env", false, "show environment variables")
+		helpFlag    = flag.Bool("help", false, "show help")
+		versionFlag = flag.Bool("version", false, "show version")
+	)
 	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("witr %s (commit %s, built %s)\n", version, commit, buildDate)
-		os.Exit(0)
-	}
-	// To embed version, commit, and build date, use:
-	// go build -ldflags "-X main.version=v0.1.0 -X main.commit=$(git rev-parse --short HEAD) -X 'main.buildDate=$(date +%Y-%m-%d)'" -o witr ./cmd/witr
-	if *envFlag {
-		var t model.Target
-		switch {
-		case *pidFlag != "":
-			t = model.Target{Type: model.TargetPID, Value: *pidFlag}
-		case *portFlag != "":
-			t = model.Target{Type: model.TargetPort, Value: *portFlag}
-		case len(flag.Args()) > 0:
-			t = model.Target{Type: model.TargetName, Value: flag.Args()[0]}
-		default:
-			printHelp()
-			os.Exit(1)
-		}
-
-		pids, err := target.Resolve(t)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if len(pids) > 1 {
-			fmt.Print("Multiple matching processes found:\n\n")
-			for i, pid := range pids {
-				cmdline := procpkg.GetCmdline(pid)
-				fmt.Printf("[%d] PID %d   %s\n", i+1, pid, cmdline)
-			}
-			fmt.Println("\nRe-run with:")
-			fmt.Println("  witr --pid <pid> --env")
-			os.Exit(1)
-		}
-		pid := pids[0]
-		procInfo, err := procpkg.ReadProcess(pid)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if *jsonFlag {
-			type envOut struct {
-				Command string   `json:"Command"`
-				Env     []string `json:"Env"`
-			}
-			out := envOut{Command: procInfo.Cmdline, Env: procInfo.Env}
-			enc, _ := json.MarshalIndent(out, "", "  ")
-			fmt.Println(string(enc))
-		} else {
-			output.RenderEnvOnly(procInfo, !*noColorFlag)
-		}
-		return
-	}
 
 	if *helpFlag {
 		printHelp()
-		os.Exit(0)
+		return
+	}
+	if *versionFlag {
+		fmt.Printf("witr %s (commit %s, built %s)\n", version, commit, buildDate)
+		return
 	}
 
-	var t model.Target
-
-	switch {
-	case *pidFlag != "":
-		t = model.Target{Type: model.TargetPID, Value: *pidFlag}
-	case *portFlag != "":
-		t = model.Target{Type: model.TargetPort, Value: *portFlag}
-	case len(flag.Args()) > 0:
-		t = model.Target{Type: model.TargetName, Value: flag.Args()[0]}
-	default:
-		printHelp()
-		os.Exit(1)
-	}
-
-	pids, err := target.Resolve(t)
+	// Resolve target to PID
+	pid, err := resolveTarget(*pidFlag, *portFlag, flag.Args())
 	if err != nil {
-		errStr := err.Error()
-		fmt.Println()
-		fmt.Println("Error:")
-		fmt.Printf("  %s\n", errStr)
-		if strings.Contains(errStr, "socket found but owning process not detected") {
-			fmt.Println("\nA socket was found for the port, but the owning process could not be detected.")
-			fmt.Println("This may be due to insufficient permissions. Try running with sudo:")
-			// Print the actual command the user entered, prefixed with sudo
-			fmt.Print("  sudo ")
-			for i, arg := range os.Args {
-				if i > 0 {
-					fmt.Print(" ")
-				}
-				fmt.Print(arg)
-			}
-			fmt.Println()
-		} else {
-			fmt.Println("\nNo matching process or service found. Please check your query or try a different name/port/PID.")
-		}
-		fmt.Println("For usage and options, run: witr --help")
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	if len(pids) > 1 {
-		fmt.Print("Multiple matching processes found:\n\n")
-		for i, pid := range pids {
-			cmdline := procpkg.GetCmdline(pid)
-			fmt.Printf("[%d] PID %d   %s\n", i+1, pid, cmdline)
-		}
-		fmt.Println("\nRe-run with:")
-		fmt.Println("  witr --pid <pid>")
-		os.Exit(1)
-	}
-
-	pid := pids[0]
-
+	// Build ancestry chain
 	ancestry, err := process.BuildAncestry(pid)
-	if err != nil {
-		fmt.Println()
-		fmt.Println("Error:")
-		fmt.Printf("  %s\n", err.Error())
-		fmt.Println("\nNo matching process or service found. Please check your query or try a different name/port/PID.")
-		fmt.Println("For usage and options, run: witr --help")
+	if err != nil || len(ancestry) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: cannot read process %d\n", pid)
 		os.Exit(1)
 	}
 
-	src := source.Detect(ancestry)
+	target := ancestry[len(ancestry)-1]
+	color := !*noColorFlag
 
-	var proc model.Process
-	resolvedTarget := "unknown"
-	if len(ancestry) > 0 {
-		proc = ancestry[len(ancestry)-1]
-		resolvedTarget = proc.Command
+	// Handle special output modes
+	if *envFlag {
+		renderEnv(target, *jsonFlag)
+		return
 	}
 
-	// Calculate restart count (consecutive same-command entries)
-	restartCount := 0
-	lastCmd := ""
-	for _, procA := range ancestry {
-		if procA.Command == lastCmd {
-			restartCount++
-		}
-		lastCmd = procA.Command
+	// Convert to detect.Process interface
+	procs := make([]detect.Process, len(ancestry))
+	for i, p := range ancestry {
+		procs[i] = p
 	}
 
-	res := model.Result{
-		Target:         t,
-		ResolvedTarget: resolvedTarget,
-		Process:        proc,
-		RestartCount:   restartCount,
-		Ancestry:       ancestry,
-		Source:         src,
-		Warnings:       source.Warnings(ancestry),
-	}
-
-	// Add socket state info for port queries
-	if t.Type == model.TargetPort {
-		portNum := 0
-		fmt.Sscanf(t.Value, "%d", &portNum)
-		if portNum > 0 {
-			res.SocketInfo = procpkg.GetSocketStateForPort(portNum)
-		}
-	}
-
-	// Add resource context (thermal state, sleep prevention)
-	res.ResourceContext = procpkg.GetResourceContext(pid)
-
-	// Add file context (open files, locks)
-	res.FileContext = procpkg.GetFileContext(pid)
+	src := detect.Detect(procs)
+	warnings := detect.Warnings(procs)
 
 	if *jsonFlag {
-		importJson, _ := output.ToJSON(res)
-		fmt.Println(importJson)
+		renderJSON(ancestry, src, warnings)
 	} else if *warnFlag {
-		output.RenderWarnings(res.Warnings, !*noColorFlag)
+		renderWarnings(warnings, color)
 	} else if *treeFlag {
-		output.PrintTree(res.Ancestry, !*noColorFlag)
+		renderTree(ancestry, color)
 	} else if *shortFlag {
-		output.RenderShort(res, !*noColorFlag)
+		renderShort(ancestry, color)
 	} else {
-		output.RenderStandard(res, !*noColorFlag)
+		renderStandard(ancestry, src, warnings, color)
 	}
+}
+
+func printHelp() {
+	fmt.Println(`Usage: witr [--pid N | --port N | name] [options]
+
+Options:
+  --pid <n>      Explain a specific PID
+  --port <n>     Explain port usage
+  --short        One-line summary
+  --tree         Show process ancestry tree
+  --json         Output as JSON
+  --warnings     Show only warnings
+  --no-color     Disable colorized output
+  --env          Show environment variables
+  --help         Show this help
+  --version      Show version`)
+}
+
+func resolveTarget(pid, port int, args []string) (int, error) {
+	if pid > 0 {
+		return pid, nil
+	}
+	if port > 0 {
+		return resolvePort(port)
+	}
+	if len(args) > 0 {
+		return resolveName(args[0])
+	}
+	return 0, fmt.Errorf("no target specified. Run: witr --help")
+}
+
+func resolveName(name string) (int, error) {
+	var matches []int
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+		if strings.TrimSpace(string(comm)) == name {
+			matches = append(matches, pid)
+		}
+	}
+	if len(matches) == 0 {
+		return 0, fmt.Errorf("no process found: %s", name)
+	}
+	if len(matches) > 1 {
+		fmt.Println("Multiple processes found:")
+		for i, pid := range matches {
+			fmt.Printf("  [%d] PID %d  %s\n", i+1, pid, process.GetCmdline(pid))
+		}
+		return 0, fmt.Errorf("re-run with: witr --pid <pid>")
+	}
+	return matches[0], nil
+}
+
+func resolvePort(port int) (int, error) {
+	// Read listening sockets from /proc/net/tcp
+	sockets := make(map[string]int) // inode -> port
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n")[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 10 || fields[3] != "0A" { // 0A = LISTEN
+				continue
+			}
+			local := fields[1]
+			if idx := strings.LastIndex(local, ":"); idx != -1 {
+				p, _ := strconv.ParseInt(local[idx+1:], 16, 32)
+				if int(p) == port {
+					sockets[fields[9]] = port // inode
+				}
+			}
+		}
+	}
+
+	if len(sockets) == 0 {
+		return 0, fmt.Errorf("no process listening on port %d", port)
+	}
+
+	// Find PID by scanning /proc/*/fd for matching inodes
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		fdPath := fmt.Sprintf("/proc/%d/fd", pid)
+		fds, _ := os.ReadDir(fdPath)
+		for _, fd := range fds {
+			link, _ := os.Readlink(fdPath + "/" + fd.Name())
+			if strings.HasPrefix(link, "socket:[") {
+				inode := strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")
+				if _, ok := sockets[inode]; ok {
+					return pid, nil
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("socket found on port %d but process not detected (try sudo)", port)
+}
+
+// Output renderers
+const (
+	reset   = "\033[0m"
+	red     = "\033[31m"
+	green   = "\033[32m"
+	blue    = "\033[34m"
+	cyan    = "\033[36m"
+	magenta = "\033[35m"
+	dim     = "\033[2m"
+)
+
+func renderEnv(p process.Process, asJSON bool) {
+	if asJSON {
+		out, _ := json.MarshalIndent(map[string]any{
+			"command": p.Cmdline,
+			"env":     p.Env,
+		}, "", "  ")
+		fmt.Println(string(out))
+	} else {
+		fmt.Printf("%sCommand%s: %s\n", green, reset, p.Cmdline)
+		if len(p.Env) > 0 {
+			fmt.Printf("%sEnvironment%s:\n", blue, reset)
+			for _, e := range p.Env {
+				fmt.Printf("  %s\n", e)
+			}
+		} else {
+			fmt.Printf("%sNo environment variables found%s\n", red, reset)
+		}
+	}
+}
+
+func renderJSON(ancestry []process.Process, src detect.Source, warnings []string) {
+	out, _ := json.MarshalIndent(map[string]any{
+		"ancestry": ancestry,
+		"source":   src,
+		"warnings": warnings,
+	}, "", "  ")
+	fmt.Println(string(out))
+}
+
+func renderWarnings(warnings []string, color bool) {
+	if len(warnings) == 0 {
+		fmt.Println("No warnings.")
+		return
+	}
+	for _, w := range warnings {
+		if color {
+			fmt.Printf("%s•%s %s\n", red, reset, w)
+		} else {
+			fmt.Printf("• %s\n", w)
+		}
+	}
+}
+
+func renderTree(ancestry []process.Process, color bool) {
+	for i, p := range ancestry {
+		indent := strings.Repeat("  ", i)
+		prefix := ""
+		if i > 0 {
+			prefix = "└─ "
+		}
+		if color {
+			fmt.Printf("%s%s%s%s (%spid %d%s)\n", indent, prefix, green, p.Command, dim, p.PID, reset)
+		} else {
+			fmt.Printf("%s%s%s (pid %d)\n", indent, prefix, p.Command, p.PID)
+		}
+	}
+}
+
+func renderShort(ancestry []process.Process, color bool) {
+	var parts []string
+	for _, p := range ancestry {
+		if color {
+			parts = append(parts, fmt.Sprintf("%s (%spid %d%s)", p.Command, dim, p.PID, reset))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s (pid %d)", p.Command, p.PID))
+		}
+	}
+	if color {
+		fmt.Println(strings.Join(parts, fmt.Sprintf(" %s→%s ", magenta, reset)))
+	} else {
+		fmt.Println(strings.Join(parts, " → "))
+	}
+}
+
+func renderStandard(ancestry []process.Process, src detect.Source, warnings []string, color bool) {
+	p := ancestry[len(ancestry)-1]
+
+	label := func(s string) string {
+		if color {
+			return fmt.Sprintf("%s%s%s", blue, s, reset)
+		}
+		return s
+	}
+
+	fmt.Printf("%s: %s\n\n", label("Target"), p.Command)
+	fmt.Printf("%s: %s (pid %d)", label("Process"), p.Command, p.PID)
+	if p.Health != "" && p.Health != "healthy" {
+		fmt.Printf(" [%s]", p.Health)
+	}
+	fmt.Println()
+
+	if p.User != "" {
+		fmt.Printf("%s: %s\n", label("User"), p.User)
+	}
+	fmt.Printf("%s: %s\n", label("Command"), p.Cmdline)
+	fmt.Printf("%s: %s\n", label("Started"), formatTime(p.StartedAt))
+
+	// Ancestry chain
+	fmt.Printf("\n%s:\n  ", label("Why It Exists"))
+	for i, a := range ancestry {
+		fmt.Printf("%s (pid %d)", a.Command, a.PID)
+		if i < len(ancestry)-1 {
+			if color {
+				fmt.Printf(" %s→%s ", magenta, reset)
+			} else {
+				fmt.Print(" → ")
+			}
+		}
+	}
+	fmt.Println()
+
+	// Source
+	fmt.Printf("\n%s: %s", label("Source"), src.Name)
+	if src.Name != string(src.Type) {
+		fmt.Printf(" (%s)", src.Type)
+	}
+	fmt.Println()
+
+	// Context
+	if p.WorkingDir != "" {
+		fmt.Printf("\n%s: %s\n", label("Working Dir"), p.WorkingDir)
+	}
+	if p.GitRepo != "" {
+		if p.GitBranch != "" {
+			fmt.Printf("%s: %s (%s)\n", label("Git Repo"), p.GitRepo, p.GitBranch)
+		} else {
+			fmt.Printf("%s: %s\n", label("Git Repo"), p.GitRepo)
+		}
+	}
+	if len(p.ListeningPorts) > 0 {
+		for i, port := range p.ListeningPorts {
+			addr := "0.0.0.0"
+			if i < len(p.BindAddresses) {
+				addr = p.BindAddresses[i]
+			}
+			if i == 0 {
+				fmt.Printf("%s: %s:%d\n", label("Listening"), addr, port)
+			} else {
+				fmt.Printf("            %s:%d\n", addr, port)
+			}
+		}
+	}
+
+	// Warnings
+	if len(warnings) > 0 {
+		fmt.Printf("\n%s:\n", label("Warnings"))
+		for _, w := range warnings {
+			fmt.Printf("  • %s\n", w)
+		}
+	}
+}
+
+func formatTime(t time.Time) string {
+	dur := time.Since(t)
+	var rel string
+	switch {
+	case dur.Hours() >= 48:
+		rel = fmt.Sprintf("%d days ago", int(dur.Hours())/24)
+	case dur.Hours() >= 24:
+		rel = "1 day ago"
+	case dur.Hours() >= 1:
+		rel = fmt.Sprintf("%d hours ago", int(dur.Hours()))
+	case dur.Minutes() >= 1:
+		rel = fmt.Sprintf("%d min ago", int(dur.Minutes()))
+	default:
+		rel = "just now"
+	}
+	return fmt.Sprintf("%s (%s)", rel, t.Format("2006-01-02 15:04:05"))
 }

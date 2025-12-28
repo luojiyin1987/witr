@@ -33,8 +33,9 @@
 - [9. Platform Support](#9-platform-support)
   - [9.1 Feature Compatibility Matrix](#91-feature-compatibility-matrix)
   - [9.2 Permissions Note](#92-permissions-note)
-- [10. Success Criteria](#10-success-criteria)
-- [11. AI Assistance Disclaimer](#11-ai-assistance-disclaimer)
+- [10. Semi-automatic Helper Script](#10-semi-automatic-helper-script)
+- [11. Success Criteria](#11-success-criteria)
+- [12. AI Assistance Disclaimer](#12-ai-assistance-disclaimer)
 
 ---
 
@@ -533,7 +534,21 @@ Note: Due to macOS System Integrity Protection (SIP), some system process detail
 
 ---
 
-## 10. Success Criteria
+## 10. Semi-automatic Helper Script
+
+If you want a lightweight approximation without building witr, use:
+
+```bash
+scripts/witr-lite.sh --port 5432
+scripts/witr-lite.sh --pid 1234
+scripts/witr-lite.sh --name nginx
+```
+
+This script combines `lsof`, `ps`, `pstree`, `systemctl`, and `launchctl` (when available) to reconstruct a best-effort causal chain.
+
+---
+
+## 11. Success Criteria
 
 witr is successful if:
 
@@ -544,7 +559,7 @@ witr is successful if:
 
 ---
 
-## 11. AI Assistance Disclaimer
+## 12. AI Assistance Disclaimer
 
 This project was developed with assistance from AI/LLMs (including GitHub Copilot, ChatGPT, and related tools), supervised by humans who occasionally knew what they were doing.
 
